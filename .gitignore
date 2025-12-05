@@ -1,0 +1,12 @@
+cat << 'EOF' > .gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+
+# ローカル検証用の一時ファイル
+b64*.txt
+test_sanitize.csv
+EOF
+
