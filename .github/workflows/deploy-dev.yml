@@ -20,6 +20,8 @@ jobs:
     env:
       AWS_REGION: ap-northeast-1
       LAMBDA_FUNCTION_NAME: csv-escape-sanitize
+      # ここが最終的に正しい handler
+      LAMBDA_HANDLER: backend.fastapi_app.lambda_handler.handler
 
     steps:
       - name: Checkout
@@ -36,6 +38,28 @@ jobs:
           role-to-assume: arn:aws:iam::127882229774:role/GitHubActions-OIDC
           aws-region: ${{ env.AWS_REGION }}
 
+      # ----------------------------
+      # (1) 먼저 handler 設定を確実にする（衝突を避けるためコード更新より前）
+      # ----------------------------
+      - name: Ensure Lambda handler setting (before code update)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Setting handler to: ${LAMBDA_HANDLER}"
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --handler "${LAMBDA_HANDLER}" || true
+
+          # 設定反映を待つ（ここが重要）
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME}"
+
+          echo "Current config:"
+          aws lambda get-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --query '{Handler:Handler,Runtime:Runtime,LastUpdateStatus:LastUpdateStatus}' \
+            --output json
+
       - name: Install dependencies (build package)
         run: |
           python -m pip install --upgrade pip
@@ -45,25 +69,23 @@ jobs:
         run: |
           cp -r backend package/
           cp -r core package/
+          cp -f backend/fastapi_app/lambda_handler.py package/lambda_handler.py
 
       - name: Create deployment zip
         run: |
           cd package
           zip -r ../function.zip .
 
+      # ----------------------------
+      # (2) その後にコード更新
+      # ----------------------------
       - name: Deploy to Lambda (update function code)
         run: |
           aws lambda update-function-code \
             --function-name "${LAMBDA_FUNCTION_NAME}" \
             --zip-file "fileb://function.zip"
 
-      - name: Ensure Lambda handler setting
-        run: |
-          aws lambda update-function-configuration \
-            --function-name "${LAMBDA_FUNCTION_NAME}" \
-            --handler "backend.fastapi_app.lambda_handler.handler"
-
-      - name: Wait for Lambda update
+      - name: Wait for Lambda update (after code update)
         run: |
           aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME}"
 
