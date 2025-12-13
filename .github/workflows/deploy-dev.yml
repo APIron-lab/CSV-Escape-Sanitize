@@ -45,7 +45,6 @@ jobs:
         run: |
           cp -r backend package/
           cp -r core package/
-          cp -f backend/fastapi_app/lambda_handler.py package/lambda_handler.py
 
       - name: Create deployment zip
         run: |
@@ -57,6 +56,12 @@ jobs:
           aws lambda update-function-code \
             --function-name "${LAMBDA_FUNCTION_NAME}" \
             --zip-file "fileb://function.zip"
+
+      - name: Ensure Lambda handler setting
+        run: |
+          aws lambda update-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --handler "backend.fastapi_app.lambda_handler.handler"
 
       - name: Wait for Lambda update
         run: |
