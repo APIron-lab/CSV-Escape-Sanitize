@@ -1,0 +1,65 @@
+name: Deploy (dev)
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ap-northeast-1
+      FUNCTION_NAME: csv-escape-sanitize
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build deployment package (zip)
+        run: |
+          python -m pip install --upgrade pip
+
+          rm -rf build package lambda.zip
+          mkdir -p package
+
+          # 依存を package/ にインストール
+          pip install -r requirements.txt -t package
+
+          # アプリコードを同梱（重要：core/ と backend/）
+          cp -r core package/core
+          cp -r backend package/backend
+
+          # 不要物があれば除外（任意）
+          rm -rf package/**/__pycache__ || true
+          rm -rf package/**/*.pyc || true
+
+          # ZIP化
+          cd package
+          zip -r ../lambda.zip .
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update Lambda function code
+        run: |
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file "fileb://lambda.zip"
+
+      - name: Update Lambda handler (set once; safe to repeat)
+        run: |
+          aws lambda update-function-configuration \
+            --function-name "$FUNCTION_NAME" \
+            --handler "backend.fastapi_app.lambda_handler.handler" \
+            --runtime "python3.12"
+

@@ -1,6 +1,9 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ["main"]
+  pull_request:
 
 jobs:
   test:
@@ -10,7 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -19,17 +22,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov
 
-      - name: Run tests with coverage
+      - name: Run pytest
         run: |
-          pytest --cov=core --cov=backend --cov-report=xml
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}   # Public repo なら不要
-          files: ./coverage.xml
-          flags: unittests
-          fail_ci_if_error: true
+          python -m pytest -v
 
