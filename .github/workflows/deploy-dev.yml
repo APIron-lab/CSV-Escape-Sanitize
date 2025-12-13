@@ -1,8 +1,17 @@
-name: Deploy (dev)
+name: deploy-dev
 
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -10,7 +19,7 @@ jobs:
 
     env:
       AWS_REGION: ap-northeast-1
-      FUNCTION_NAME: csv-escape-sanitize
+      LAMBDA_FUNCTION_NAME: csv-escape-sanitize
 
     steps:
       - name: Checkout
@@ -21,45 +30,39 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build deployment package (zip)
-        run: |
-          python -m pip install --upgrade pip
-
-          rm -rf build package lambda.zip
-          mkdir -p package
-
-          # 依存を package/ にインストール
-          pip install -r requirements.txt -t package
-
-          # アプリコードを同梱（重要：core/ と backend/）
-          cp -r core package/core
-          cp -r backend package/backend
-
-          # 不要物があれば除外（任意）
-          rm -rf package/**/__pycache__ || true
-          rm -rf package/**/*.pyc || true
-
-          # ZIP化
-          cd package
-          zip -r ../lambda.zip .
-
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::127882229774:role/GitHubActions-OIDC
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Update Lambda function code
+      - name: Install dependencies (build package)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -t package
+
+      - name: Copy application code into package
+        run: |
+          cp -r backend package/
+          cp -r core package/
+          cp -f backend/fastapi_app/lambda_handler.py package/lambda_handler.py
+
+      - name: Create deployment zip
+        run: |
+          cd package
+          zip -r ../function.zip .
+
+      - name: Deploy to Lambda (update function code)
         run: |
           aws lambda update-function-code \
-            --function-name "$FUNCTION_NAME" \
-            --zip-file "fileb://lambda.zip"
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --zip-file "fileb://function.zip"
 
-      - name: Update Lambda handler (set once; safe to repeat)
+      - name: Wait for Lambda update
         run: |
-          aws lambda update-function-configuration \
-            --function-name "$FUNCTION_NAME" \
-            --handler "backend.fastapi_app.lambda_handler.handler" \
-            --runtime "python3.12"
+          aws lambda wait function-updated --function-name "${LAMBDA_FUNCTION_NAME}"
+
+      - name: (Optional) Publish new version
+        run: |
+          aws lambda publish-version --function-name "${LAMBDA_FUNCTION_NAME}"
 
