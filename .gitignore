@@ -10,3 +10,7 @@ b64*.txt
 test_sanitize.csv
 EOF
 
+
+# local backups / artifacts
+*.bak.*/
+lambda_deployed.zip
