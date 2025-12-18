@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Literal, Optional, List, Dict
 
 from pydantic import BaseModel, Field
+from pydantic.config import ConfigDict
 
 
 Mode = Literal["escape", "analyze", "sanitize"]
@@ -13,6 +15,19 @@ TargetProfile = Literal["excel", "db_rfc4180", "ai_safety", "custom"]
 QuotePolicy = Literal["minimal", "all", "non_numeric"]
 ExcelInjectionProtection = Literal["none", "prefix_quote", "strip_formula"]
 TrimWhitespace = Literal["none", "left", "right", "both"]
+
+
+class ResponseLevel(str, Enum):
+    """
+    Response verbosity level.
+    - simple   : Minimal payload for end-users (csv_text + minimal meta)
+    - standard : Includes issues + stats + effective_config
+    - debug    : Full response for diagnostics (includes structure_stats_before, etc.)
+    """
+
+    simple = "simple"
+    standard = "standard"
+    debug = "debug"
 
 
 class Issue(BaseModel):
@@ -36,9 +51,14 @@ class Stats(BaseModel):
 
 
 class CsvEscapeResult(BaseModel):
+    """
+    result 部は response_level に応じて省略されうるため、
+    stats は Optional とする（simple 時は stats なし）。
+    """
+
     csv_text: str
     issues: List[Issue] = Field(default_factory=list)
-    stats: Stats
+    stats: Optional[Stats] = None
 
 
 class CsvEscapeResponse(BaseModel):
@@ -78,12 +98,21 @@ class CsvEscapeRequest(BaseModel):
     null_representation: Optional[str] = None
     add_bom: bool = False
 
-    class Config:
-        schema_extra = {
+    # v0.2 追加: レスポンス冗長度
+    response_level: ResponseLevel = Field(
+        default=ResponseLevel.simple,
+        description="Response verbosity: simple | standard | debug",
+    )
+
+    # Pydantic v2: schema_extra -> json_schema_extra
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "mode": "escape",
                 "csv_b64": "<Base64 encoded CSV string>",
                 "target_profile": "excel",
+                "response_level": "simple",
             }
         }
+    )
 

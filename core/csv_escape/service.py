@@ -5,7 +5,7 @@ import csv
 import io
 import statistics
 from dataclasses import dataclass, asdict
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 from .models import (
     CsvEscapeRequest,
@@ -13,6 +13,7 @@ from .models import (
     CsvEscapeResponse,
     Issue,
     Stats,
+    ResponseLevel,
 )
 
 
@@ -139,12 +140,7 @@ def _analyze_structure(
     delimiter: str,
     has_header: bool | None,
 ) -> Tuple[Stats, List[Issue]]:
-    """簡易な構造解析。Sanitize 前の「元データ状態」を表現する。
-
-    - 各行の列数を数える
-    - min / max / 最頻値を Stats に格納
-    - 列数が「最頻列数」と異なる行を Issue として登録
-    """
+    """簡易な構造解析。Sanitize 前の「元データ状態」を表現する。"""
     issues: List[Issue] = []
 
     non_empty_rows = [r for r in rows if not (len(r) == 0 or (len(r) == 1 and r[0] == ""))]
@@ -172,7 +168,7 @@ def _analyze_structure(
     fixed = 0
     unfixed = 0
 
-    for i, (row, col_count) in enumerate(zip(non_empty_rows, col_counts), start=1):
+    for i, (col_count) in enumerate(col_counts, start=1):
         if col_count != columns_mode:
             issue = Issue(
                 type="COLUMN_COUNT_MISMATCH",
@@ -211,19 +207,12 @@ def _sanitize_rows(
     expected_columns: int,
     delimiter: str,
 ) -> Tuple[List[List[str]], List[Issue], int]:
-    """列数の揃っていない行や空行を修正して、構造を安定させる。
-
-    ポリシー（v0.2）:
-      - 完全な空行は削除
-      - 列数 < expected_columns: 末尾に空セルを追加
-      - 列数 > expected_columns: 期待列数−1までを保持し、残りを 1 セルに結合
-    """
+    """列数の揃っていない行や空行を修正して、構造を安定させる。"""
     sanitized: List[List[str]] = []
     issues: List[Issue] = []
     fixed_count = 0
 
     for idx, row in enumerate(rows, start=1):
-        # 完全な空行は削除
         if len(row) == 0 or (len(row) == 1 and row[0] == ""):
             issues.append(
                 Issue(
@@ -264,9 +253,7 @@ def _sanitize_rows(
             sanitized.append(new_row)
             continue
 
-        # col_count > expected_columns
         if expected_columns <= 1:
-            # 期待列数 1 の場合はすべて結合
             merged = delimiter.join(row)
             new_row = [merged]
         else:
@@ -305,10 +292,7 @@ def _resolve_effective_config(
     detected_delimiter: str,
     has_header_bool: Optional[bool],
 ) -> EffectiveConfig:
-    """
-    target_profile とリクエスト内容・検出結果から、
-    実際に用いる設定値 (EffectiveConfig) を決定する。
-    """
+    """target_profile と検出結果から実際に用いる設定値 (EffectiveConfig) を決定する。"""
 
     if request.line_ending == "auto":
         if detected_le in ("crlf", "lf"):
@@ -364,8 +348,6 @@ def _resolve_effective_config(
         cfg.trim_whitespace = "both"
         cfg.escape_style = "rfc4180"
 
-    # profile == "custom" の場合は base 設定をそのまま利用
-
     return cfg
 
 
@@ -378,12 +360,8 @@ def _escape_rows_to_text(
     rows: List[List[str]],
     cfg: EffectiveConfig,
 ) -> str:
-    """2 次元配列の rows を CSV テキストに再構成する。
+    """2 次元配列の rows を CSV テキストに再構成する。"""
 
-    - delimiter / quote_char は cfg に準拠
-    - line_ending は cfg.line_ending ("lf"/"crlf")
-    - quote_policy, excel_injection_protection, trim_whitespace 等も適用
-    """
     if cfg.line_ending == "crlf":
         lineterminator = "\r\n"
     else:
@@ -456,6 +434,64 @@ def _escape_rows_to_text(
 
 
 # ---------------------------------------------------------------------------
+# response_level による間引き
+# ---------------------------------------------------------------------------
+
+
+def _minimize_response(
+    level: ResponseLevel,
+    csv_text: str,
+    issues: List[Issue],
+    stats: Stats,
+    meta_full: Dict[str, Any],
+) -> CsvEscapeResponse:
+    """
+    互換性のためトップ構造 {result, meta} は維持しつつ、
+    response_level に応じて result/meta の中身を最小化する。
+    """
+
+    # 共通の最小 meta
+    meta_simple: Dict[str, Any] = {
+        "version": meta_full.get("version"),
+        "profile": meta_full.get("profile"),
+        "mode_used": meta_full.get("mode_used"),
+        "response_level_used": level.value,
+    }
+
+    if level == ResponseLevel.simple:
+        result = CsvEscapeResult(
+            csv_text=csv_text,
+            issues=[],
+            stats=None,
+        )
+        return CsvEscapeResponse(result=result, meta=meta_simple)
+
+    if level == ResponseLevel.standard:
+        meta_standard: Dict[str, Any] = dict(meta_simple)
+        # standard では「適用された設定」までは返す（挙動説明に必要）
+        if "effective_config" in meta_full:
+            meta_standard["effective_config"] = meta_full["effective_config"]
+        # sanitize の場合だけ、ユーザーに有益なので sanitized フラグは残す
+        if "sanitized" in meta_full:
+            meta_standard["sanitized"] = meta_full["sanitized"]
+
+        result = CsvEscapeResult(
+            csv_text=csv_text,
+            issues=issues,
+            stats=stats,
+        )
+        return CsvEscapeResponse(result=result, meta=meta_standard)
+
+    # debug: 現在のフル仕様を維持（meta_full をそのまま返す）
+    result = CsvEscapeResult(
+        csv_text=csv_text,
+        issues=issues,
+        stats=stats,
+    )
+    return CsvEscapeResponse(result=result, meta=meta_full)
+
+
+# ---------------------------------------------------------------------------
 # API エントリーポイント
 # ---------------------------------------------------------------------------
 
@@ -497,20 +533,24 @@ def process_csv(request: CsvEscapeRequest) -> CsvEscapeResponse:
         rows = all_rows
 
     # 7) 構造解析（Sanitize 前の状態）
-    stats_before, issues = _analyze_structure(rows, cfg.delimiter, cfg.has_header)
+    stats_before, issues_before = _analyze_structure(rows, cfg.delimiter, cfg.has_header)
 
-    # 8) mode に応じて処理を分岐
+    # 8) mode に応じて処理を分岐（ここでは “フル情報” を作る）
+    issues_out: List[Issue]
+    stats_out: Stats
+    csv_text_out: str
+    meta_full: Dict[str, Any]
+
     if request.mode == "analyze":
-        # analyze モードでは内容はなるべく変えない（改行コードのみプロファイル準拠に調整）
         if cfg.line_ending == "crlf":
             csv_text_out = text_normalized.replace("\n", "\r\n")
         else:
             csv_text_out = text_normalized
 
         stats_out = stats_before
-        issues_out = issues
+        issues_out = issues_before
 
-        meta = {
+        meta_full = {
             "version": "0.2.0",
             "profile": cfg.profile,
             "mode_used": request.mode,
@@ -519,7 +559,6 @@ def process_csv(request: CsvEscapeRequest) -> CsvEscapeResponse:
         }
 
     elif request.mode == "sanitize":
-        # Sanitize で列数などを揃えたうえで Escape する
         expected_cols = stats_before.columns_mode or stats_before.columns_max or 0
 
         sanitized_rows, sanitize_issues, fixed_count = _sanitize_rows(
@@ -528,7 +567,6 @@ def process_csv(request: CsvEscapeRequest) -> CsvEscapeResponse:
             delimiter=cfg.delimiter,
         )
 
-        # Sanitize 後の Stats
         stats_out = Stats(
             rows=len(sanitized_rows),
             columns_min=expected_cols,
@@ -540,11 +578,10 @@ def process_csv(request: CsvEscapeRequest) -> CsvEscapeResponse:
             has_header=stats_before.has_header,
         )
 
-        issues_out = issues + sanitize_issues
-
+        issues_out = issues_before + sanitize_issues
         csv_text_out = _escape_rows_to_text(rows=sanitized_rows, cfg=cfg)
 
-        meta = {
+        meta_full = {
             "version": "0.2.0",
             "profile": cfg.profile,
             "mode_used": request.mode,
@@ -556,20 +593,21 @@ def process_csv(request: CsvEscapeRequest) -> CsvEscapeResponse:
     else:  # "escape"
         csv_text_out = _escape_rows_to_text(rows=rows, cfg=cfg)
         stats_out = stats_before
-        issues_out = issues
+        issues_out = issues_before
 
-        meta = {
+        meta_full = {
             "version": "0.2.0",
             "profile": cfg.profile,
             "mode_used": request.mode,
             "effective_config": asdict(cfg),
         }
 
-    result = CsvEscapeResult(
+    # 9) response_level に応じて最終レスポンスを生成
+    return _minimize_response(
+        level=request.response_level,
         csv_text=csv_text_out,
         issues=issues_out,
         stats=stats_out,
+        meta_full=meta_full,
     )
-
-    return CsvEscapeResponse(result=result, meta=meta)
 
